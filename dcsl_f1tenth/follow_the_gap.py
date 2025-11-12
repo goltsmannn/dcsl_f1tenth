@@ -23,15 +23,22 @@ class FollowTheGapController(Node):
 
         self.declare_parameter('safety_bubble_radius', 0.15)
         self.declare_parameter('initial_speed', 1.0)
+        self.declare_parameter('min_steering_angle', -0.4)
+        self.declare_parameter('max_steering_angle', 0.4)
+        self.declare_parameter('steering_angle_rate', 1.0)
 
         self.initial_speed = self.get_parameter('initial_speed').value
         self.safety_bubble_radius = self.get_parameter('safety_bubble_radius').value
+        self.min_steering_angle = self.get_parameter('min_steering_angle').value
+        self.max_steering_angle = self.get_parameter('max_steering_angle').value
+        self.steering_angle_rate = self.get_parameter('steering_angle_rate').value
 
         self.create_subscription(LaserScan, '/scan', self.step_controller, 1)
         self.drive_pub = self.create_publisher(AckermannDriveStamped, '/drive', drive_qos)
 
+        
     def preprocess_data(self, msg: LaserScan):
-        ranges = np.array(msg.ranges)
+        ranges = np.array(msg.ranges)[::-1] # lidar data is right-to-left. important
         valid_mask = (ranges >= msg.range_min) & (ranges <= msg.range_max)
         min_index = np.argmin(np.where(valid_mask, ranges, np.inf))
         safety_radius = int(np.ceil(self.safety_bubble_radius / (msg.angle_increment * ranges[min_index])))
@@ -48,7 +55,7 @@ class FollowTheGapController(Node):
 
     def find_best_point(self, preprocessed_data, gap_start, gap_end):
         max_idx_in_segment = np.argmax(preprocessed_data[gap_start:gap_end + 1])
-        best_point_idx = gap_start + max_idx_in_segment
+        best_point_idx = gap_start + (max_idx_in_segment + (gap_end - gap_start) // 2) // 2
         return best_point_idx
 
     def step_controller(self, msg: LaserScan):
@@ -64,17 +71,19 @@ class FollowTheGapController(Node):
         command.drive.acceleration = 0.0
         command.drive.jerk = 0.0
 
-        command.drive.steering_angle_velocity = 0.0
-        command.drive.steering_angle = (best_point_idx - len(msg.ranges) / 2) * msg.angle_increment
+        command.drive.steering_angle_velocity = self.steering_angle_rate
+        command.drive.steering_angle = np.clip(-1 * (best_point_idx - len(msg.ranges) / 2) * msg.angle_increment, self.min_steering_angle, self.max_steering_angle) # convert to left = positive 
 
         self.drive_pub.publish(command)
 
         self.ax = visualize_scan(
-            ranges=np.array(msg.ranges),
+            ranges=np.array(msg.ranges)[::-1],
             processed_ranges=preprocessed_data,
             gap_start=gap_start,
             gap_end=gap_end,
             best_point_idx=best_point_idx,
+            start_idx=start_idx,
+            end_idx=end_idx,
             ax=getattr(self, 'ax', None)  # reuse Axes if already created
         )
 
@@ -84,6 +93,8 @@ def visualize_scan(ranges: np.ndarray,
                    gap_start: int,
                    gap_end: int,
                    best_point_idx: int,
+                   start_idx: int,
+                    end_idx: int,
                    ax=None):
     if ax is None:
         plt.ion()
@@ -93,8 +104,6 @@ def visualize_scan(ranges: np.ndarray,
         ax.set_xlim(0, len(ranges))
     ax.set_ylim(0, np.max(ranges) + 1)
     ax.legend()
-
-
 
     ax.cla()
     
@@ -107,7 +116,10 @@ def visualize_scan(ranges: np.ndarray,
     
     # Highlight best point
     ax.plot(best_point_idx, processed_ranges[best_point_idx], 'go', label='Best point')
+    # Highlight safety bubble
     
+    ax.axvspan(start_idx, end_idx, color='red', alpha=0.2, label='Safety bubble')
+
     ax.set_xlabel('Laser index')
     ax.set_ylabel('Distance (m)')
     ax.set_xlim(0, len(ranges))

@@ -1,7 +1,7 @@
 follow_the_gap:
   ros__parameters:
-    safety_bubble_radius: 0.15
-    initial_speed: 1.0
-    min_steering_angle: -0.4
-    max_steering_angle: 0.4
-    steering_angle_rate: 1.0
+    obstacle_threshold: 1.0
+    initial_speed: 2.0
+    min_steering_angle: -0.34
+    max_steering_angle: 0.34
+    steering_angle_rate: 0.7

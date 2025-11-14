@@ -1,0 +1,8 @@
+disparity_extender:
+  ros__parameters:
+    obstacle_threshold: 0.5
+    initial_speed: 5.0
+    min_steering_angle: -0.5
+    max_steering_angle: 0.5
+    steering_angle_rate: 1.0
+    max_speed: 5.0

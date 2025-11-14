@@ -36,7 +36,7 @@ class DisparityExtenderController(Node):
             setattr(self, param, self.get_parameter(param).value)
 
         # static parameters 
-        self.process_period = 1.0
+        self.process_period = 0.05
         self.last_process_time = 0.0
 
         # dynamic parameters
@@ -57,7 +57,8 @@ class DisparityExtenderController(Node):
         ranges[-crop_amount:] = 0.0 # zero our right side
 
         edges = np.diff(ranges) 
-        thresholds = np.minimum(ranges[:-1], ranges[1:]) * 0.1
+        # take a min of every pair to get distance at edge for obstacle (not for gap)
+        thresholds = np.minimum(ranges[:-1], ranges[1:]) * 0.2
         rising_edges_indices = np.where(edges > thresholds)[0] # rising edge = disparity ends, gap begins, index of smaller elemen (obstacle)
         falling_edges_indices = np.where(edges < -thresholds)[0] + 1 # falling edge = disparity begins, gap ends, index of bigger element (obstacle)
         
@@ -66,12 +67,29 @@ class DisparityExtenderController(Node):
     
     def inflate_disparities(self, ranges, rising_edges_indices, falling_edges_indices, angle_measurement):
         # calculate how many indices to extend obstacle into based on distance
-        extension_rising = np.ceil(self.obstacle_threshold / (np.maximum(ranges[rising_edges_indices], 1e-6) * angle_measurement)).astype(int) 
-        extension_falling = np.ceil(self.obstacle_threshold / (np.maximum(ranges[falling_edges_indices], 1e-6) * angle_measurement)).astype(int)
+        extension_rising = np.ceil(self.obstacle_threshold / (np.maximum(ranges[rising_edges_indices], 1e-6) * angle_measurement), where=ranges[rising_edges_indices] > 0).astype(int) 
+        extension_falling = np.ceil(self.obstacle_threshold / (np.maximum(ranges[falling_edges_indices], 1e-6) * angle_measurement), where=ranges[falling_edges_indices] > 0).astype(int)
         # extend the disparities
-        inflated_rising_edges = rising_edges_indices + extension_rising
-        inflated_falling_edges = falling_edges_indices - extension_falling
+        rising_mask = rising_edges_indices < len(ranges) // 2
 
+        # if obstacle to the left, extend it to the right 
+        inflated_rising_edges = np.where(
+            rising_mask,
+            rising_edges_indices + extension_rising,
+            rising_edges_indices - extension_rising
+        )    
+
+        # if obstacle ends at the left, extend to the left
+        falling_mask = falling_edges_indices < len(ranges) // 2
+        inflated_falling_edges = np.where(
+            falling_mask,
+            falling_edges_indices - extension_falling,
+            falling_edges_indices + extension_falling
+        )
+        print(len(ranges), flush=True)
+        print("Rising edges indices:", rising_edges_indices, "Falling edges indices:", falling_edges_indices, flush=True)
+        print("Extension rising:", extension_rising, "Extension falling:", extension_falling, flush=True)
+        print("Inflated rising edges:", inflated_rising_edges, "Inflated falling edges:", inflated_falling_edges, flush=True)
         # clamp to valid indices
         valid_inflated_rising_indices = (inflated_rising_edges >= 0) & (inflated_rising_edges < len(ranges))
         valid_inflated_falling_indices = (inflated_falling_edges >= 0) & (inflated_falling_edges < len(ranges))
@@ -139,16 +157,16 @@ class DisparityExtenderController(Node):
         ranges, rising_edges_indices, falling_edges_indices = self.preprocess_data(msg)
         # print(len(ranges), flush=True)
         # print("Uninflated rising edges indices:", rising_edges_indices, "falling edges indices:", falling_edges_indices, flush=True)
-        rising_edges_indices, falling_edges_indices = self.inflate_disparities(ranges, rising_edges_indices, falling_edges_indices, msg.angle_increment)
+        inflated_rising_edges_indices, inflated_falling_edges_indices = self.inflate_disparities(ranges, rising_edges_indices, falling_edges_indices, msg.angle_increment)
         # print("Rising edges indices:", rising_edges_indices, "Falling edges indices:", falling_edges_indices, flush=True)
-        gaps = self.extract_gaps(rising_edges_indices, falling_edges_indices)
+        gaps = self.extract_gaps(inflated_rising_edges_indices, inflated_falling_edges_indices)
 
         best_gap = self.find_best_gap(gaps, ranges)
 
         best_point_idx = self.find_best_point(ranges, best_gap) if best_gap is not None else len(ranges) // 2
 
         angle, speed = self.get_turning_angle_and_speed(ranges, best_point_idx, msg.angle_increment)
-
+        # speed = 0.0
         command = AckermannDriveStamped()
         command.header.stamp = self.get_clock().now().to_msg()
         command.header.frame_id = "base_link"
@@ -161,7 +179,13 @@ class DisparityExtenderController(Node):
         command.drive.steering_angle = angle 
 
         self.drive_pub.publish(command)
-        self.ax = visualize_scan(ranges, rising_edges_indices, falling_edges_indices, gaps, best_gap, best_point_idx, ax=self.ax)
+        self.ax = visualize_scan(ranges, 
+                                rising_edges_indices,
+                                falling_edges_indices,
+                                gaps, best_gap, best_point_idx,
+                                inflated_rising_edges=inflated_rising_edges_indices,
+                                inflated_falling_edges=inflated_falling_edges_indices,
+                                ax=self.ax)
         return
 
 
@@ -170,7 +194,9 @@ def visualize_scan(ranges: np.ndarray,
                    falling_edges: np.ndarray,
                    gaps=None,
                    best_gap=None,
-                     best_point_idx=None,
+                    best_point_idx=None,
+                    inflated_rising_edges=None,
+                    inflated_falling_edges=None,
                    ax=None):
     if ax is None:
         plt.ion()
@@ -195,6 +221,26 @@ def visualize_scan(ranges: np.ndarray,
     if best_point_idx is not None:
         ax.scatter(best_point_idx, ranges[best_point_idx], color='magenta', label='Best point', marker='x', s=100)
         
+
+    if inflated_rising_edges is not None and len(inflated_rising_edges) > 0:
+        ax.scatter(
+            inflated_rising_edges,
+            ranges[inflated_rising_edges],
+            color='cyan',
+            label='Inflated rising',
+            marker='>',
+            s=60
+        )
+    if inflated_falling_edges is not None and len(inflated_falling_edges) > 0:
+        ax.scatter(
+            inflated_falling_edges,
+            ranges[inflated_falling_edges],
+            color='orange',
+            label='Inflated falling',
+            marker='<',
+            s=60
+        )
+
     # avoid duplicate entries in legend
     handles, labels = ax.get_legend_handles_labels()
     unique = dict(zip(labels, handles))
